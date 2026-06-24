@@ -1,0 +1,51 @@
+app: vjepa_ll_probe_guidance
+cpus_per_task: 12
+folder: ./outputs/ultrasound_vitl
+mem_per_gpu: 220G
+nodes: 1 
+tasks_per_node: 1
+data:
+  data_root: /home/jack/python-fiducial-objects/training_dataset
+  batch_size: 4
+  frames_per_clip: 8
+  fps: 4
+  num_workers: 8
+  patch_size: 16
+  pin_mem: true
+  stereo_view: false
+  tubelet_size: 2
+loss:
+  auto_steps: 2
+  loss_exp: 1.0
+  normalize_reps: true
+  reg_coeff: 0.0
+meta:
+  dtype: bfloat16
+  eval_freq: 100
+  resume_checkpoint: null
+  load_predictor: false
+  pretrain_checkpoint: /home/jack/vjepa2_probe_guidance/checkpoints/vitl.pt
+  context_encoder_key: target_encoder
+  target_encoder_key: target_encoder
+  save_every_freq: 25
+  seed: 239
+  use_sdpa: true
+model:
+  model_name: vit_large
+  predictor_type: "ac"
+  patch_size: 16
+  pred_depth: 12 
+  pred_embed_dim: 768
+  pred_num_heads: 12
+  action_embed_dim: 6
+  use_extrinsics: false
+optimization:
+  anneal: 15
+  epochs: 315
+  final_lr: 0.0
+  final_weight_decay: 0.04
+  ipe: 300
+  lr: 0.0001
+  start_lr: 0.00001
+  warmup: 15
+  weight_decay: 0.04

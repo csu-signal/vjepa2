@@ -14,8 +14,8 @@ from src.models.utils.modules import build_action_block_causal_attention_mask
 from src.utils.tensors import trunc_normal_
 
 
-class VisionTransformerPredictorAC(nn.Module):
-    """Action Conditioned Vision Transformer Predictor"""
+class VisionTransformerPredictorSFAC(nn.Module):
+    """State-Free Action-Conditioned Vision Transformer Predictor"""
 
     def __init__(
         self,
@@ -52,8 +52,7 @@ class VisionTransformerPredictorAC(nn.Module):
         # Map input to predictor dimension
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
         self.action_encoder = nn.Linear(action_embed_dim, predictor_embed_dim, bias=True)
-        self.state_encoder = nn.Linear(action_embed_dim, predictor_embed_dim, bias=True)
-        self.extrinsics_encoder = nn.Linear(action_embed_dim - 1, predictor_embed_dim, bias=True)
+        self.extrinsics_encoder = nn.Linear(6, predictor_embed_dim, bias=True)
 
         # Determine positional embedding
         if type(img_size) is int:
@@ -70,9 +69,6 @@ class VisionTransformerPredictorAC(nn.Module):
         self.use_activation_checkpointing = use_activation_checkpointing
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-
-        # Position embedding
-        self.uniform_power = uniform_power
 
         # Attention Blocks
         self.use_rope = use_rope
@@ -112,7 +108,7 @@ class VisionTransformerPredictorAC(nn.Module):
             grid_height = self.img_height // self.patch_size
             grid_width = self.img_width // self.patch_size
             attn_mask = build_action_block_causal_attention_mask(
-                grid_depth, grid_height, grid_width, add_tokens=3 if use_extrinsics else 2
+                grid_depth, grid_height, grid_width, add_tokens=2 if use_extrinsics else 1
             )
         self.attn_mask = attn_mask
 
@@ -133,9 +129,11 @@ class VisionTransformerPredictorAC(nn.Module):
             rescale(layer.attn.proj.weight.data, layer_id + 1)
             rescale(layer.mlp.fc2.weight.data, layer_id + 1)
 
-    def forward(self, x, actions, states, extrinsics=None):
+    def forward(self, x, actions, extrinsics=None):
         """
         :param x: context tokens
+        :param actions: movement commands
+        :param extrinsics: optional camera extrinsics
         """
         # Map tokens to predictor dimensions
         x = self.predictor_embed(x)
@@ -143,19 +141,15 @@ class VisionTransformerPredictorAC(nn.Module):
         T = N_ctxt // (self.grid_height * self.grid_width)
 
         # Interleave action tokens
-        s = self.state_encoder(states).unsqueeze(2)
-        a = self.action_encoder(actions).unsqueeze(2)
+        a = self.action_encoder(actions).unsqueeze(2)  # [B, T, 1, D]
         x = x.view(B, T, self.grid_height * self.grid_width, D)  # [B, T, H*W, D]
-        #print(f"In ac_predictor: {s.shape=}")
-        #print(f"In ac_predictor: {a.shape=}")
-        #print(f"In ac_predictor: {x.shape=}")
         if self.use_extrinsics:
             e = self.extrinsics_encoder(extrinsics).unsqueeze(2)
-            x = torch.cat([a, s, e, x], dim=2).flatten(1, 2)  # [B, T*(H*W+3), D]
+            x = torch.cat([a, e, x], dim=2).flatten(1, 2)  # [B, T*(H*W+2), D]
         else:
-            x = torch.cat([a, s, x], dim=2).flatten(1, 2)  # [B, T*(H*W+2), D]
+            x = torch.cat([a, x], dim=2).flatten(1, 2)  # [B, T*(H*W+1), D]
 
-        cond_tokens = 3 if self.use_extrinsics else 2
+        cond_tokens = 2 if self.use_extrinsics else 1
         attn_mask = self.attn_mask[: x.size(1), : x.size(1)].to(x.device, non_blocking=True)
 
         # Fwd prop
@@ -193,8 +187,8 @@ class VisionTransformerPredictorAC(nn.Module):
         return x
 
 
-def vit_ac_predictor(**kwargs):
-    model = VisionTransformerPredictorAC(
+def vit_sfac_predictor(**kwargs):
+    model = VisionTransformerPredictorSFAC(
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
