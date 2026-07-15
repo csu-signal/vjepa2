@@ -1,11 +1,11 @@
 app: vjepa_ll_probe_guidance
 cpus_per_task: 12
-folder: ./outputs/ultrasound_vitl
+folder: ./outputs/ll_probe_guidance_vitl
 mem_per_gpu: 220G
 nodes: 1 
 tasks_per_node: 1
 data:
-  data_root: /home/jack/python-fiducial-objects/training_dataset
+  data_root: /home/jack/data/probe_guidance_dataset_june/train
   batch_size: 4
   frames_per_clip: 8
   fps: 4
@@ -24,7 +24,7 @@ meta:
   eval_freq: 100
   resume_checkpoint: null
   load_predictor: false
-  pretrain_checkpoint: /home/jack/vjepa2_probe_guidance/checkpoints/vitl.pt
+  pretrain_checkpoint: /home/jack/code/vjepa2_probe_guidance/checkpoints/vitl.pt
   context_encoder_key: target_encoder
   target_encoder_key: target_encoder
   save_every_freq: 25

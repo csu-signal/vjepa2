@@ -102,7 +102,18 @@ class LLProbeGuidanceDataset(Dataset):
             action = np.concatenate([delta_xyz, delta_rvec])
             actions.append(action)
 
-        return np.array(actions, dtype=np.float32)
+        actions = np.array(actions, dtype=np.float32)
+
+        # TODO: don't hardcode this, maybe calculate this beforehand in __init__
+        action_mean = np.array([-3.4351324e-05,  9.2879518e-06,  5.7907491e-05, -1.0462669e-03,
+            1.9893083e-03, -1.8098091e-03], dtype=np.float32)
+        action_std = np.array([0.00492197, 0.00438933, 0.00637379, 0.55627733,
+            0.44276735, 0.7314012], dtype=np.float32)
+
+        # add 1e-6 to prevent division by 0 (in case std is ever 0)
+        actions = (actions - action_mean) / (action_std + 1e-6)
+
+        return actions
 
     def __len__(self):
         return len(self.episodes)
