@@ -21,12 +21,14 @@ import copy
 import gc
 import random
 import time
+import math
 
 import numpy as np
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
+from tqdm import tqdm
 
 from app.vjepa_ll_probe_guidance.ll_probe_guidance import init_data
 from app.vjepa_ll_probe_guidance.transforms import make_transforms
@@ -59,6 +61,7 @@ def main(args, resume_preempt=False):
     # -- META
     folder = args.get("folder")
     cfgs_meta = args.get("meta")
+    eval_freq = cfgs_meta.get("eval_freq", 10)
     r_file = cfgs_meta.get("resume_checkpoint", None)
     p_file = cfgs_meta.get("pretrain_checkpoint", None)
     load_predictor = cfgs_meta.get("load_predictor", False)
@@ -103,8 +106,10 @@ def main(args, resume_preempt=False):
     # -- DATA
     cfgs_data = args.get("data")
     data_root = cfgs_data.get("data_root")
+    val_data_root = cfgs_data.get("val_data_root")
     max_num_frames = cfgs_data.get("frames_per_clip", 16)
-    batch_size = cfgs_data.get("batch_size")
+    train_batch_size = cfgs_data.get("batch_size")
+    val_batch_size = cfgs_data.get("val_batch_size")
     tubelet_size = cfgs_data.get("tubelet_size", 2)
     fps = cfgs_data.get("fps", 4)
     crop_size = cfgs_data.get("crop_size", 256)
@@ -216,7 +221,7 @@ def main(args, resume_preempt=False):
     # -- init data-loaders/samplers
     (unsupervised_loader, unsupervised_sampler) = init_data(
         data_root=data_root,
-        batch_size=batch_size,
+        batch_size=train_batch_size,
         frames_per_clip=max_num_frames,
         frame_skip=1, # NOTE: hardcoded to 1 here because of jankiness for aligning states/actions to frames (which get duplicated!)
         fps=fps,
@@ -228,6 +233,26 @@ def main(args, resume_preempt=False):
         persistent_workers=persistent_workers,
         rank=rank,
     )
+
+    val_loader = None
+    if rank == 0:
+        val_data_root = cfgs_data.get("val_data_root", None)
+        val_loader, _ = init_data(
+            data_root=val_data_root,
+            batch_size=val_batch_size,
+            frames_per_clip=max_num_frames,
+            frame_skip=1,
+            fps=fps,
+            transform=transform,
+            collator=video_collator,
+            num_workers=num_workers,
+            world_size=1,
+            pin_mem=pin_mem,
+            persistent_workers=persistent_workers,
+            rank=0,
+            is_train=False
+        )
+
     _dlen = len(unsupervised_loader)
     if ipe is None:
         ipe = _dlen
@@ -302,7 +327,7 @@ def main(args, resume_preempt=False):
             "target_encoder": target_encoder.state_dict(),
             "epoch": epoch,
             "loss": loss_meter.avg,
-            "batch_size": batch_size,
+            "batch_size": train_batch_size,
             "world_size": world_size,
             "lr": lr,
         }
@@ -332,6 +357,78 @@ def main(args, resume_preempt=False):
         gc.disable()
         gc.collect()
 
+    def forward_target(c, batch_size):
+        with torch.no_grad():
+            c = c.permute(0, 2, 1, 3, 4).flatten(0, 1).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+            h = target_encoder(c)
+            h = h.view(batch_size, max_num_frames, -1, h.size(-1)).flatten(1, 2)
+            if normalize_reps:
+                h = F.layer_norm(h, (h.size(-1),))
+            return h
+
+    def forward_predictions(z, actions, states, extrinsics):
+        def _step_predictor(_z, _a, _s, _e):
+            if is_state_free:
+                _z = predictor(_z, _a, extrinsics=_e)
+            else:
+                _z = predictor(_z, _a, _s, extrinsics=_e)
+            if normalize_reps:
+                _z = F.layer_norm(_z, (_z.size(-1),))
+            return _z
+
+        _z, _a, _s, _e = z[:, :-tokens_per_frame], actions, states[:, :-1], extrinsics[:, :-1]
+        z_tf = _step_predictor(_z, _a, _s, _e)
+
+        _z = torch.cat([z[:, : tokens_per_frame], z_tf[:, : tokens_per_frame]], dim=1)
+        for n in range(1, auto_steps):
+            _a, _s, _e = actions[:, : n + 1], states[:, : n + 1], extrinsics[:, : n + 1]
+            _z_nxt = _step_predictor(_z, _a, _s, _e)[:, -tokens_per_frame:]
+            _z = torch.cat([_z, _z_nxt], dim=1)
+        z_ar = _z[:, tokens_per_frame:]
+        return z_tf, z_ar
+
+    def loss_fn(z, h):
+        _h = h[:, tokens_per_frame : z.size(1) + tokens_per_frame]
+        return torch.mean(torch.abs(z - _h) ** loss_exp) / loss_exp
+
+    def load_clips(sample):
+        clips = sample[0].to(device, non_blocking=True)  # [B C T H W]
+        actions = sample[1].to(device, dtype=torch.float, non_blocking=True)  # [B T-1 6]
+        states = sample[2].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
+        extrinsics = sample[3].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
+        return (clips, actions, states, extrinsics)
+
+    def validate(encoder, predictor, target_encoder, loader, device):
+        encoder.eval()
+        predictor.eval()
+        # Dont bother placing target_encoder into eval() mode TODO verify more closely if that's okay
+
+        val_loss_meter = AverageMeter()
+        val_jloss_meter = AverageMeter()
+        val_sloss_meter = AverageMeter()
+
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):
+                for sample in tqdm(loader, total=len(loader), desc="Performing validation"):
+                    clips, actions, states, extrinsics = load_clips(sample)
+
+                    h = forward_target(clips, val_batch_size)
+                    z_tf, z_ar = forward_predictions(h, actions, states, extrinsics)
+
+                    jloss = loss_fn(z_tf, h)
+                    sloss = loss_fn(z_ar, h)
+                    loss = jloss + sloss
+                    
+                    val_jloss_meter.update(float(jloss))
+                    val_sloss_meter.update(float(sloss))
+                    val_loss_meter.update(float(loss))
+
+        encoder.train()
+        predictor.train()
+        return val_loss_meter.avg, val_jloss_meter.avg, val_sloss_meter.avg
+    
+    best_val_loss = math.inf
+
     # -- TRAINING LOOP
     for epoch in range(start_epoch, num_epochs):
         logger.info("Epoch %d" % (epoch + 1))
@@ -343,6 +440,7 @@ def main(args, resume_preempt=False):
         gpu_time_meter = AverageMeter()
         data_elapsed_time_meter = AverageMeter()
 
+        # TRAINING
         for itr in range(ipe):
             itr_start_time = time.time()
 
@@ -366,14 +464,7 @@ def main(args, resume_preempt=False):
                         logger.warning(f"Exceeded max retries ({NUM_RETRIES}) when loading data. Skipping batch.")
                         raise e
 
-            def load_clips():
-                clips = sample[0].to(device, non_blocking=True)  # [B C T H W]
-                actions = sample[1].to(device, dtype=torch.float, non_blocking=True)  # [B T-1 6]
-                states = sample[2].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
-                extrinsics = sample[3].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
-                return (clips, actions, states, extrinsics)
-
-            clips, actions, states, extrinsics = load_clips()
+            clips, actions, states, extrinsics = load_clips(sample)
             data_elapsed_time_ms = (time.time() - itr_start_time) * 1000.0
 
             # TODO: What the garbage collector doin?
@@ -384,56 +475,11 @@ def main(args, resume_preempt=False):
             def train_step():
                 _new_lr = scheduler.step()
                 _new_wd = wd_scheduler.step()
-                # --
-
-                def forward_target(c):
-                    with torch.no_grad():
-                        c = c.permute(0, 2, 1, 3, 4).flatten(0, 1).unsqueeze(2).repeat(1, 1, 2, 1, 1)
-                        h = target_encoder(c)
-                        h = h.view(batch_size, max_num_frames, -1, h.size(-1)).flatten(1, 2)
-                        if normalize_reps:
-                            h = F.layer_norm(h, (h.size(-1),))
-                        return h
-
-                def forward_predictions(z):
-
-                    def _step_predictor(_z, _a, _s, _e):
-                        if is_state_free:
-                            # Simply ignore state in this case
-                            _z = predictor(_z, _a, extrinsics=_e)
-                        else:
-                            _z = predictor(_z, _a, _s, extrinsics=_e)
-                        if normalize_reps:
-                            _z = F.layer_norm(_z, (_z.size(-1),))
-                        return _z
-
-                    # -- one step of predictor with teacher forcing
-                    _z, _a, _s, _e = z[:, :-tokens_per_frame], actions, states[:, :-1], extrinsics[:, :-1]
-                    #print(f"{tokens_per_frame=}")
-                    #print(f"{_z.shape=}")
-                    #print(f"{_a.shape=}")
-                    #print(f"{_s.shape=}")
-                    #print(f"{_e.shape=}")
-                    z_tf = _step_predictor(_z, _a, _s, _e)
-
-                    # -- full auto-regressive rollouts of predictor
-                    _z = torch.cat([z[:, : tokens_per_frame], z_tf[:, : tokens_per_frame]], dim=1)
-                    for n in range(1, auto_steps):
-                        _a, _s, _e = actions[:, : n + 1], states[:, : n + 1], extrinsics[:, : n + 1]
-                        _z_nxt = _step_predictor(_z, _a, _s, _e)[:, -tokens_per_frame:]
-                        _z = torch.cat([_z, _z_nxt], dim=1)
-                    z_ar = _z[:, tokens_per_frame:]
-
-                    return z_tf, z_ar
-
-                def loss_fn(z, h):
-                    _h = h[:, tokens_per_frame : z.size(1) + tokens_per_frame]
-                    return torch.mean(torch.abs(z - _h) ** loss_exp) / loss_exp
 
                 # Step 1. Forward
                 with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):
-                    h = forward_target(clips)
-                    z_tf, z_ar = forward_predictions(h)
+                    h = forward_target(clips, train_batch_size)
+                    z_tf, z_ar = forward_predictions(h, actions, states, extrinsics)
                     jloss = loss_fn(z_tf, h)
                     sloss = loss_fn(z_ar, h)
                     loss = jloss + sloss
@@ -503,12 +549,35 @@ def main(args, resume_preempt=False):
             log_stats()
             assert not np.isnan(loss), "loss is nan"
 
-        # -- Save Checkpoint
-        logger.info("avg. loss %.3f" % loss_meter.avg)
-        # -- Save Last
+        logger.info("avg. train loss %.3f" % loss_meter.avg)
+
+        # Validation
+        is_eval_epoch = (epoch % eval_freq == 0) or (epoch == num_epochs - 1)
+        
+        if rank == 0 and is_eval_epoch:
+            logger.info("Starting validation...")
+            val_loss_avg, _, _ = validate(
+                encoder.module, 
+                predictor.module, 
+                target_encoder.module, 
+                val_loader, 
+                device, 
+            )
+            logger.info("avg. val loss %.3f" % val_loss_avg)
+
+        # Checkpointing
         if epoch % CHECKPOINT_FREQ == 0 or epoch == (num_epochs - 1):
+            # Save latest model
             save_checkpoint(epoch + 1, latest_path)
             if save_every_freq > 0 and epoch % save_every_freq == 0:
                 save_every_file = f"e{epoch}.pt"
                 save_every_path = os.path.join(folder, save_every_file)
                 save_checkpoint(epoch + 1, save_every_path)
+            if val_loss_avg < best_val_loss:
+                best_path = os.path.join(folder, "best.pt")
+                save_checkpoint(epoch + 1, best_path)
+                best_val_loss = val_loss_avg
+
+        # If there are multiple GPUs, wait for rank 0 GPU to finish validation and then continue
+        if world_size > 1:
+            torch.distributed.barrier()

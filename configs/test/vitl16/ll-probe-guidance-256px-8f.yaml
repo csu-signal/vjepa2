@@ -1,14 +1,12 @@
 app: vjepa_ll_probe_guidance
 cpus_per_task: 12
-folder: ./outputs/ll_probe_guidance_vitl_2
+folder: ./outputs/ll_probe_guidance_vitl
 mem_per_gpu: 220G
 nodes: 1 
 tasks_per_node: 1
 data:
-  data_root: /home/jack/data/probe_guidance_dataset_june/train
-  val_data_root: /home/jack/data/probe_guidance_dataset_june/val
-  batch_size: 4
-  val_batch_size: 16
+  data_root: /home/jack/data/probe_guidance_dataset_june/test
+  batch_size: 16
   frames_per_clip: 8
   fps: 4
   num_workers: 8
@@ -23,9 +21,8 @@ loss:
   reg_coeff: 0.0
 meta:
   dtype: bfloat16
-  eval_freq: 25
-  resume_checkpoint: null
-  load_predictor: false
+  eval_freq: 100
+  resume_checkpoint: latest.pt
   pretrain_checkpoint: /home/jack/code/vjepa2_probe_guidance/checkpoints/vitl.pt
   context_encoder_key: target_encoder
   target_encoder_key: target_encoder
@@ -41,7 +38,6 @@ model:
   pred_num_heads: 12
   action_embed_dim: 6
   use_extrinsics: false
-  use_rope: true
 optimization:
   anneal: 15
   epochs: 315

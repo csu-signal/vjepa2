@@ -20,12 +20,14 @@ class LLProbeGuidanceDataset(Dataset):
         frames_per_second=4,
         frame_skip=2, 
         transform=None,
+        is_train=True
     ):
         self.data_root = data_root
         self.frames_per_clip = frames_per_clip
         self.frames_per_second = frames_per_second
         self.frame_skip = frame_skip
         self.transform = transform
+        self.is_train = is_train
 
         raw_episodes = sorted([
             os.path.join(data_root, d) for d in os.listdir(data_root)
@@ -74,6 +76,14 @@ class LLProbeGuidanceDataset(Dataset):
         self.episodes = list(self.valid_starts_map.keys())
         print(f"Retained {len(self.episodes)} episodes.")
 
+        # FOR TESTING: WE NEED TO EVALUATE ON EVERY CLIP
+        if not self.is_train:
+            self.eval_index = []
+            for ep in self.episodes:
+                valid_starts = self.valid_starts_map[ep]
+                for start in valid_starts:
+                    self.eval_index.append((ep, start))
+
     def poses_to_diffs(self, states):
         """ Converts 6-DoF absolute states into Egocentric Actions. """
         xyz = states[:, :3]
@@ -116,13 +126,18 @@ class LLProbeGuidanceDataset(Dataset):
         return actions
 
     def __len__(self):
-        return len(self.episodes)
+        if self.is_train:
+            return len(self.episodes)
+        else:
+            return len(self.eval_index)
 
     def __getitem__(self, index):
-        episode_path = self.episodes[index]
-
-        valid_starts = self.valid_starts_map[episode_path]
-        start_idx = np.random.choice(valid_starts)
+        if self.is_train:
+            episode_path = self.episodes[index]
+            valid_starts = self.valid_starts_map[episode_path]
+            start_idx = np.random.choice(valid_starts)
+        else:
+            episode_path, start_idx = self.eval_index[index]
 
         clip_len = self.frames_per_clip * self.frame_step
         indices = np.arange(start_idx, start_idx + clip_len, self.frame_step)
@@ -167,6 +182,8 @@ def init_data(
     persistent_workers=True,
     collator=None,
     transform=None,
+    shuffle=True,
+    is_train=True,
     **kwargs # Catch any extra DROID args we don't use
 ):
     dataset = LLProbeGuidanceDataset(
@@ -175,10 +192,11 @@ def init_data(
         frame_skip=frame_skip,
         frames_per_second=fps,
         transform=transform,
+        is_train=is_train
     )
 
     dist_sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset, num_replicas=world_size, rank=rank, shuffle=True
+        dataset, num_replicas=world_size, rank=rank, shuffle=shuffle
     )
 
     data_loader = torch.utils.data.DataLoader(
