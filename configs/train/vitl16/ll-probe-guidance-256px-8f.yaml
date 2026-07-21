@@ -1,6 +1,6 @@
 app: vjepa_ll_probe_guidance
 cpus_per_task: 12
-folder: ./outputs/ll_probe_guidance_vitl_2
+folder: ./outputs/ll_probe_guidance_vitl_3
 mem_per_gpu: 220G
 nodes: 1 
 tasks_per_node: 1

@@ -66,7 +66,7 @@ def process_main(rank, fname, world_size, devices):
             yaml.dump(params, f)
 
     # Init distributed (access to comm between GPUS on same machine)
-    world_size, rank = init_distributed(rank_and_world_size=(rank, world_size))
+    world_size, rank = init_distributed(port=37128, rank_and_world_size=(rank, world_size))
     logger.info(f"Running... (rank: {rank}/{world_size})")
 
     # Launch the app with loaded config

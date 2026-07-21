@@ -120,6 +120,7 @@ class LLProbeGuidanceDataset(Dataset):
         action_std = np.array([0.00492197, 0.00438933, 0.00637379, 0.55627733,
             0.44276735, 0.7314012], dtype=np.float32)
 
+
         # add 1e-6 to prevent division by 0 (in case std is ever 0)
         actions = (actions - action_mean) / (action_std + 1e-6)
 
@@ -145,6 +146,12 @@ class LLProbeGuidanceDataset(Dataset):
         states_path = os.path.join(episode_path, "states_6dof.npy")
         states = np.load(states_path).astype(np.float32)
         states = states[indices][:: self.frame_skip]
+
+        # TODO: don't hardcode this, maybe calculate this beforehand in __init__
+        state_mean = np.array([ -0.13193196, 0.13471916, 1.4406046, 59.395, -43.585613, -76.49974], dtype=np.float32)
+        state_std = np.array([1.05345368e-01, 1.75726220e-01, 7.28756189e-02, 7.79652252e+01, 3.07379379e+01, 1.22978004e+02], dtype=np.float32)
+
+        states = (states - state_mean) / (state_std + 1e-6)
 
         # We don't have camera intrinsics, but keep to reuse collator for DROID
         extrinsics = np.zeros_like(states)[:: self.frame_skip]

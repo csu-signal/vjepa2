@@ -8,6 +8,7 @@ def calculate_action_stats(data_root):
     dataset = LLProbeGuidanceDataset(data_root=data_root, transform=None)
     
     all_actions = []
+    all_states = []
     
     for ep_path in dataset.episodes:
         states_path = os.path.join(ep_path, "states_6dof.npy")
@@ -16,26 +17,31 @@ def calculate_action_stats(data_root):
         # We need to compute diffs only for valid consecutive frames
         # to avoid the NaN rotation matrix crash and avoid fake "jump" actions
         for i in range(len(states) - 1):
-            # Check if both current and next frame are completely valid (no NaNs)
             if not np.isnan(states[i]).any() and not np.isnan(states[i+1]).any():
                 valid_segment = states[i:i+2] 
                 
                 try:
-                    # Will return an array of shape (1, 6)
                     act = dataset.poses_to_diffs(valid_segment)
                     all_actions.append(act)
+                    all_states.append(np.expand_dims(states[i], axis=0))
+                    all_states.append(np.expand_dims(states[i+1], axis=0))
                 except Exception:
-                    # Ignore any random math anomalies (like gimbal lock)
                     pass
         
     all_actions = np.concatenate(all_actions, axis=0)
+    all_states = np.concatenate(all_states, axis=0)
     
     action_mean = np.mean(all_actions, axis=0)
     action_std = np.std(all_actions, axis=0)
+
+    states_mean = np.mean(all_states, axis=0)
+    states_std = np.std(all_states, axis=0)
     
-    print("\n--- Copy and paste these into your dataset class ---")
     print("ACTION_MEAN = np." + repr(action_mean))
     print("ACTION_STD = np." + repr(action_std))
+
+    print("STATE_MEAN = np." + repr(states_mean))
+    print("STATE_STD = np." + repr(states_std))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -359,9 +359,13 @@ def main(args, resume_preempt=False):
 
     def forward_target(c, batch_size):
         with torch.no_grad():
+            #print(f"In forward_target: c original shape: {c.shape}")
             c = c.permute(0, 2, 1, 3, 4).flatten(0, 1).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+            #print(f"In forward_target: c updated shape: {c.shape}")
             h = target_encoder(c)
+            #print(f"In forward_target: h (target_encoder output) shape: {h.shape}")
             h = h.view(batch_size, max_num_frames, -1, h.size(-1)).flatten(1, 2)
+            #print(f"In forward_target: h (target_encoder output) updated shape: {h.shape}")
             if normalize_reps:
                 h = F.layer_norm(h, (h.size(-1),))
             return h
@@ -376,15 +380,39 @@ def main(args, resume_preempt=False):
                 _z = F.layer_norm(_z, (_z.size(-1),))
             return _z
 
+        #print(f"in forward_prediction: z original shape: {z.shape}")
+        #print(f"in forward_prediction: actions original shape: {actions.shape}")
+        #print(f"in forward_prediction: states original shape: {states.shape}")
+        #print(f"in forward_prediction: extrinsics original shape: {extrinsics.shape}")
         _z, _a, _s, _e = z[:, :-tokens_per_frame], actions, states[:, :-1], extrinsics[:, :-1]
+        #print(f"---- TEACHER FORCING ----")
+        #print(f"in forward_prediction: tokens_per_frame: {tokens_per_frame}")
+        #print(f"in forward_prediction: _z shape: {_z.shape}")
+        #print(f"in forward_prediction: _a shape: {_a.shape}")
+        #print(f"in forward_prediction: _s shape: {_s.shape}")
+        #print(f"in forward_prediction: _e shape: {_e.shape}")
         z_tf = _step_predictor(_z, _a, _s, _e)
+        #print(f"in forward_prediction: z_tf shape: {z_tf.shape}")
+        #print(f"-------------------------")
 
+        #print(f"-------- ROLLOUT --------")
         _z = torch.cat([z[:, : tokens_per_frame], z_tf[:, : tokens_per_frame]], dim=1)
+        #print(f"in forward_prediction rollout: _z shape: {_z.shape}")
         for n in range(1, auto_steps):
+            # TODO: I don't think this will work if auto_steps == max_num_frames.
+            # loss_fn will cause _h to go out of bounds because it will use the last frame/state/action
+            # to make a prediction (which there will be no ground truth for).
             _a, _s, _e = actions[:, : n + 1], states[:, : n + 1], extrinsics[:, : n + 1]
+            #print(f"in forward_prediction rollout step {n}: _a shape: {_a.shape}")
+            #print(f"in forward_prediction rollout step {n}: _s shape: {_s.shape}")
+            #print(f"in forward_prediction rollout step {n}: _e shape: {_e.shape}")
             _z_nxt = _step_predictor(_z, _a, _s, _e)[:, -tokens_per_frame:]
+            #print(f"in forward_prediction rollout step {n}: _z_nxt shape: {_z_nxt.shape}")
             _z = torch.cat([_z, _z_nxt], dim=1)
+            #print(f"in forward_prediction rollout step {n}: _z shape: {_z.shape}")
         z_ar = _z[:, tokens_per_frame:]
+        #print(f"in forward_prediction rollout final: z_ar shape: {z_ar.shape}")
+        #print(f"-------------------------")
         return z_tf, z_ar
 
     def loss_fn(z, h):
