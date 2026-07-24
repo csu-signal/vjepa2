@@ -6,6 +6,7 @@ class VideoTransform:
         self.transform = T.Compose([
             T.ToTensor(), # Converts HWC numpy [0, 255] to CHW tensor [0.0, 1.0]
             T.Resize((crop_size, crop_size), antialias=True), # Fixed resize, no random scaling
+            # TODO: Should we really be using ImageNet stats for normalization? probably we should compute ultrasound specific pixel stats
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # ImageNet defaults
         ])
 
