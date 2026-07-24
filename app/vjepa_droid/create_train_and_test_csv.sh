@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DROID_PATH = /path/to/droid_raw
+echo $DROID_RAW_PATH
 
 find $DROID_RAW_PATH | grep "trajectory.h5" | awk '{gsub(/\/trajectory.h5/, ""); print}' > dataset.csv
 
