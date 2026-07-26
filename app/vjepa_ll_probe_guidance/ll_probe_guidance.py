@@ -87,9 +87,10 @@ class LLProbeGuidanceDataset(Dataset):
     def poses_to_diffs(self, states):
         """ Converts 6-DoF absolute states into Egocentric Actions. """
         xyz = states[:, :3]
-        rvecs = states[:, 3:]
-
-        rotations = Rotation.from_rotvec(rvecs)
+        rvecs_deg = states[:, 3:]
+    
+        rvecs_rad = np.deg2rad(rvecs_deg)
+        rotations = Rotation.from_rotvec(rvecs_rad)
         matrices = rotations.as_matrix()  # [T, 3, 3]
 
         actions = []
@@ -101,7 +102,8 @@ class LLProbeGuidanceDataset(Dataset):
             delta_xyz = R_t_inv @ (xyz[t + 1] - xyz[t])
             delta_R_mat = R_t_inv @ R_next
             try:
-                delta_rvec = Rotation.from_matrix(delta_R_mat).as_rotvec()
+                delta_rvec_rad = Rotation.from_matrix(delta_R_mat).as_rotvec()
+                delta_rvec_deg = np.rad2deg(delta_rvec_rad)
             except Exception as e:
                 print(f"Error: {e}")
                 print(f"R_t_inv (Current Pose Inverse):\n{R_t_inv}")
@@ -109,20 +111,10 @@ class LLProbeGuidanceDataset(Dataset):
                 print(f"delta_R_mat (The Squashed Result):\n{delta_R_mat}")
                 raise e
 
-            action = np.concatenate([delta_xyz, delta_rvec])
+            action = np.concatenate([delta_xyz, delta_rvec_deg])
             actions.append(action)
 
         actions = np.array(actions, dtype=np.float32)
-
-        # TODO: don't hardcode this, maybe calculate this beforehand in __init__
-        action_mean = np.array([-3.4351324e-05,  9.2879518e-06,  5.7907491e-05, -1.0462669e-03,
-            1.9893083e-03, -1.8098091e-03], dtype=np.float32)
-        action_std = np.array([0.00492197, 0.00438933, 0.00637379, 0.55627733,
-            0.44276735, 0.7314012], dtype=np.float32)
-
-
-        # add 1e-6 to prevent division by 0 (in case std is ever 0)
-        actions = (actions - action_mean) / (action_std + 1e-6)
 
         return actions
 
@@ -147,12 +139,6 @@ class LLProbeGuidanceDataset(Dataset):
         states = np.load(states_path).astype(np.float32)
         states = states[indices][:: self.frame_skip]
 
-        # TODO: don't hardcode this, maybe calculate this beforehand in __init__
-        state_mean = np.array([ -0.13193196, 0.13471916, 1.4406046, 59.395, -43.585613, -76.49974], dtype=np.float32)
-        state_std = np.array([1.05345368e-01, 1.75726220e-01, 7.28756189e-02, 7.79652252e+01, 3.07379379e+01, 1.22978004e+02], dtype=np.float32)
-
-        states = (states - state_mean) / (state_std + 1e-6)
-
         # We don't have camera intrinsics, but keep to reuse collator for DROID
         extrinsics = np.zeros_like(states)[:: self.frame_skip]
 
@@ -170,9 +156,31 @@ class LLProbeGuidanceDataset(Dataset):
         if self.transform is not None:
             buffer = self.transform(buffer)
 
+        # NOTE: Doing state standardization BEFORE calculating actions is incorrect. It must happen AFTER
         actions = self.poses_to_diffs(states)
-        
+
         return buffer, actions, states, extrinsics, indices
+
+
+def standardize_states(states):
+    # TODO: don't hardcode standardization values, find better way
+    state_mean = np.array([ -0.13193196, 0.13471916, 1.4406046, 
+        59.395, -43.585613, -76.49974], dtype=np.float32)
+    state_std = np.array([1.05345368e-01, 1.75726220e-01, 7.28756189e-02,
+        7.79652252e+01, 3.07379379e+01, 1.22978004e+02], dtype=np.float32)
+    
+    return (states - state_mean) / (state_std + 1e-6)
+
+
+def standardize_actions(actions):
+    # TODO: don't hardcode standardization values, find better way
+    action_mean = np.array([-2.7906366e-05,  5.4028669e-06,  6.0837847e-05,
+        -1.7707590e-03, 2.4102912e-03, -3.7514704e-04], dtype=float32)
+    action_std = np.array([0.00498742, 0.00453256, 0.00675807,
+        0.55955255, 0.43809873, 0.73082167], dtype=float32)
+
+    return (actions - action_mean) / (action_std + 1e-6)
+
 
 def init_data(
     data_root,
