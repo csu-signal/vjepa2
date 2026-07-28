@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
-from app.vjepa_ll_probe_guidance.ll_probe_guidance import init_data
+from app.vjepa_ll_probe_guidance.ll_probe_guidance import init_data, standardize_states, standardize_actions
 from app.vjepa_ll_probe_guidance.transforms import make_transforms
 from app.vjepa_ll_probe_guidance.utils import init_opt, init_video_model, load_checkpoint, load_pretrained
 from src.utils.distributed import init_distributed
@@ -396,8 +396,8 @@ def main(args, resume_preempt=False):
 
     def load_clips(sample):
         clips = sample[0].to(device, non_blocking=True)  # [B C T H W]
-        actions = sample[1].to(device, dtype=torch.float, non_blocking=True)  # [B T-1 6]
-        states = sample[2].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
+        actions = standardize_actions(sample[1]).to(device, dtype=torch.float, non_blocking=True)  # [B T-1 6]
+        states = standardize_states(sample[2]).to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
         extrinsics = sample[3].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
         return (clips, actions, states, extrinsics)
 

@@ -175,9 +175,9 @@ def standardize_states(states):
 def standardize_actions(actions):
     # TODO: don't hardcode standardization values, find better way
     action_mean = np.array([-2.7906366e-05,  5.4028669e-06,  6.0837847e-05,
-        -1.7707590e-03, 2.4102912e-03, -3.7514704e-04], dtype=float32)
+        -1.7707590e-03, 2.4102912e-03, -3.7514704e-04], dtype=np.float32)
     action_std = np.array([0.00498742, 0.00453256, 0.00675807,
-        0.55955255, 0.43809873, 0.73082167], dtype=float32)
+        0.55955255, 0.43809873, 0.73082167], dtype=np.float32)
 
     return (actions - action_mean) / (action_std + 1e-6)
 
