@@ -164,20 +164,20 @@ class LLProbeGuidanceDataset(Dataset):
 
 def standardize_states(states):
     # TODO: don't hardcode standardization values, find better way
-    state_mean = np.array([ -0.13193196, 0.13471916, 1.4406046, 
-        59.395, -43.585613, -76.49974], dtype=np.float32)
-    state_std = np.array([1.05345368e-01, 1.75726220e-01, 7.28756189e-02,
-        7.79652252e+01, 3.07379379e+01, 1.22978004e+02], dtype=np.float32)
+    state_mean = torch.tensor([ -0.13193196, 0.13471916, 1.4406046, 
+        59.395, -43.585613, -76.49974], dtype=torch.float32, device=states.device)
+    state_std = torch.tensor([1.05345368e-01, 1.75726220e-01, 7.28756189e-02,
+        7.79652252e+01, 3.07379379e+01, 1.22978004e+02], dtype=torch.float32, device=states.device)
     
     return (states - state_mean) / (state_std + 1e-6)
 
 
 def standardize_actions(actions):
     # TODO: don't hardcode standardization values, find better way
-    action_mean = np.array([-2.7906366e-05,  5.4028669e-06,  6.0837847e-05,
-        -1.7707590e-03, 2.4102912e-03, -3.7514704e-04], dtype=np.float32)
-    action_std = np.array([0.00498742, 0.00453256, 0.00675807,
-        0.55955255, 0.43809873, 0.73082167], dtype=np.float32)
+    action_mean = torch.tensor([-2.7906366e-05,  5.4028669e-06,  6.0837847e-05,
+        -1.7707590e-03, 2.4102912e-03, -3.7514704e-04], dtype=torch.float32, device=actions.device)
+    action_std = torch.tensor([0.00498742, 0.00453256, 0.00675807,
+        0.55955255, 0.43809873, 0.73082167], dtype=torch.float32, device=actions.device)
 
     return (actions - action_mean) / (action_std + 1e-6)
 
