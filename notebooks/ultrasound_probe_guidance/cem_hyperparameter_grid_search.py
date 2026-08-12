@@ -4,8 +4,12 @@ print(sys.path)
 
 import itertools
 import time
+import os
 
+import numpy as np
 import pandas as pd
+import torch
+from tqdm import tqdm
 from torch.utils.data import Subset, DataLoader
 
 from app.vjepa_ll_probe_guidance.ll_probe_guidance import LLProbeGuidanceDataset
@@ -13,18 +17,24 @@ from app.vjepa_ll_probe_guidance.utils import init_video_model
 from app.vjepa_ll_probe_guidance.transforms import make_transforms
 from notebooks.ultrasound_probe_guidance.world_model_wrapper import WorldModel
 
+#PARAM_GRID = {
+#    "rollout": [1, 2, 3],
+#    "samples": [5, 10, 15],
+#    "topk": [10],
+#    "cem_steps": [5, 10, 15],
+#}
 PARAM_GRID = {
     "rollout": [1, 2, 3],
-    "samples": [5, 10, 15],
-    "topk": [10],
-    "cem_steps": [5, 10, 15],
+    "samples": [5, 10, 15, 20],
+    "topk": [5, 10],
+    "cem_steps": [5, 10, 15, 20],
 }
 VJEPA2_AC_MODEL_PATH = "/home/jack/code/vjepa2-probe-guidance/vjepa2/outputs/ll_probe_guidance_vitl_4/best.pt"
-
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def init_models():
     encoder, predictor = init_video_model(
-        device=device,
+        device=DEVICE,
         patch_size=16,
         max_num_frames=512,
         tubelet_size=2,
@@ -66,13 +76,36 @@ def init_models():
     return None
 
 
-def main():
+def load_clips(sample, device):
+    clips = sample[0].to(device, non_blocking=True)  # [B C T H W]
+    actions = sample[1].to(device, non_blocking=True)  # [B T-1 6]
+    states = sample[2].to(device, non_blocking=True)  # [B T 6]
+    extrinsics = sample[3].to(device, non_blocking=True)  # [B T 6]
+    return (clips, actions, states, extrinsics)
 
+
+def main():
     encoder, predictor = init_models()
+
+    crop_size = 256
+    tokens_per_frame = int((crop_size // encoder.patch_size) ** 2)
+
+    transform = make_transforms(crop_size=crop_size)
+
+    T = 8
+
+    val_dataset = LLProbeGuidanceDataset(
+        data_root="/home/jack/data/probe_guidance_dataset_june/val",
+        frames_per_clip=T,
+        frame_skip=1,
+        frames_per_second=4,
+        transform=transform,
+        is_train=False
+    )
     
     np.random.seed(42)
     random_indices = np.random.choice(len(val_dataset), size=250, replace=False).tolist()
-    
+
     fast_subset = Subset(val_dataset, random_indices)
     
     loader = torch.utils.data.DataLoader(
@@ -114,7 +147,7 @@ def main():
             predictor=compiled_predictor,
             tokens_per_frame=tokens_per_frame,
             mpc_args=config,
-            device=device,
+            device=DEVICE,
         )
         
         # TODO: What is the right way to evaluate the world model's actions? 
@@ -128,10 +161,10 @@ def main():
         
         with torch.no_grad():
             for sample in tqdm(loader, total=len(loader)):
-                clips, actions, states, _ = load_clips(sample, device)
+                clips, actions, states, _ = load_clips(sample, DEVICE)
                 start_image = clips
             
-                if device.type == "cuda":
+                if DEVICE.type == "cuda":
                     torch.cuda.synchronize()
                 start_time = time.perf_counter()
                 
@@ -146,7 +179,7 @@ def main():
                     rep=z_n, pose=s_n, goal_rep=z_goal
                 )
         
-                if device.type == "cuda":
+                if DEVICE.type == "cuda":
                     torch.cuda.synchronize()
                 elapsed_time_ms = (time.perf_counter() - start_time) * 1000.0
                 inference_latencies_ms.append(elapsed_time_ms)
