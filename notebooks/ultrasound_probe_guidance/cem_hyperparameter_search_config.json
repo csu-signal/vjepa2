@@ -1,0 +1,13 @@
+{
+    "data_root": "/home/jack/data/probe_guidance_dataset_june/val",
+    "clip_size": 8,
+    "crop_size": 256,
+    "output_csv": "cem_hyperparameter_grid_search.csv",
+    "vjepa2_ac_model_path": "/home/jack/code/vjepa2-probe-guidance/vjepa2/outputs/ll_probe_guidance_vitl_4/best.pt",
+    "param_grid": {
+        "rollout": [1, 2, 3],
+	    "samples": [5, 10, 15, 20],
+	    "topk": [5, 10],
+	    "cem_steps": [5, 10, 15, 20]
+    }
+}

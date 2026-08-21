@@ -1,3 +1,19 @@
+# TODO: think about adding "world model simulation" steps. 
+# So in other words, simulate actually taking actions from the world model for a certain amount of steps.
+# However, the best way to evaluate this is probably to just look at the entire action trajectories from CEM
+# and not just the first action. Does the entire action trajectory actually get us closer to the goal state?
+# The problem with checking the first action is that it makes comparing parameter values choices for the rollout steps
+# not very meaningful. If the model only has 1 action to get to the goal state, It will just try to jump there right away.
+# But if it has many rollout steps available, it might select a bunch of random intermediate movements to "stall for time" almost.
+# Ideally if it has many rollout steps available, it will still find a decent/best path to the goal, and then literally do nothing
+# with the remaining rollout steps once it reaches the goal (i.e. predict a bunch of [0, 0, 0, 0, 0, 0] actions).
+
+# TODO: What is the right way to evaluate the world model's actions? 
+# Is it only important that the world model's predicted representations match the goal representations?
+# For the ultrasound dataset, maybe we just care that the states end up the same. Which is synonymous with
+# reaching the goal state, but only assuming that the patient hasn't moved at all... (i.e. nothing else about the environment changed)
+
+
 import sys
 sys.path.insert(0, "/home/jack/code/vjepa2-probe-guidance/vjepa2")
 print(sys.path)
@@ -5,6 +21,10 @@ print(sys.path)
 import itertools
 import time
 import os
+import json
+from pathlib import Path
+from datetime import datetime
+import random
 
 import numpy as np
 import pandas as pd
@@ -17,22 +37,11 @@ from app.vjepa_ll_probe_guidance.utils import init_video_model
 from app.vjepa_ll_probe_guidance.transforms import make_transforms
 from notebooks.ultrasound_probe_guidance.world_model_wrapper import WorldModel
 
-#PARAM_GRID = {
-#    "rollout": [1, 2, 3],
-#    "samples": [5, 10, 15],
-#    "topk": [10],
-#    "cem_steps": [5, 10, 15],
-#}
-PARAM_GRID = {
-    "rollout": [1, 2, 3],
-    "samples": [5, 10, 15, 20],
-    "topk": [5, 10],
-    "cem_steps": [5, 10, 15, 20],
-}
-VJEPA2_AC_MODEL_PATH = "/home/jack/code/vjepa2-probe-guidance/vjepa2/outputs/ll_probe_guidance_vitl_4/best.pt"
+
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def init_models():
+
+def init_models(vjepa2_ac_model_path):
     encoder, predictor = init_video_model(
         device=DEVICE,
         patch_size=16,
@@ -64,14 +73,14 @@ def init_models():
         model.load_state_dict(new_state_dict, strict=True)
         return model
     
-    if os.path.exists(VJEPA2_AC_MODEL_PATH):
-        print(f"Loading checkpoint from {VJEPA2_AC_MODEL_PATH}")
-        checkpoint = torch.load(VJEPA2_AC_MODEL_PATH, map_location=torch.device("cpu"))
+    if os.path.exists(vjepa2_ac_model_path):
+        print(f"Loading checkpoint from {vjepa2_ac_model_path}")
+        checkpoint = torch.load(vjepa2_ac_model_path, map_location=torch.device("cpu"))
         encoder = load_state_dict_with_ddp_fix(encoder, checkpoint["encoder"])
         predictor = load_state_dict_with_ddp_fix(predictor, checkpoint["predictor"])
         return encoder, predictor
     else:
-        print(f"Checkpoint not found at {VJEPA2_AC_MODEL_PATH}")
+        print(f"Checkpoint not found at {vjepa2_ac_model_path}")
 
     return None
 
@@ -85,27 +94,37 @@ def load_clips(sample, device):
 
 
 def main():
-    encoder, predictor = init_models()
+    # Load config parameters
+    with open("cem_hyperparameter_search_config.json", "r") as f:
+        config = json.load(f)
 
-    crop_size = 256
+    data_root = config["data_root"]
+    param_grid = config["param_grid"]
+    T = config["clip_size"]
+    crop_size = config["crop_size"]
+    vjepa2_ac_model_path = config["vjepa2_ac_model_path"]
+
+    # Set randomization seeds
+    random.seed(42)    
+    np.random.seed(42)
+
+    # Load models
+    encoder, predictor = init_models(vjepa2_ac_model_path)
+    compiled_predictor = torch.compile(predictor, dynamic=True)
+
     tokens_per_frame = int((crop_size // encoder.patch_size) ** 2)
-
-    transform = make_transforms(crop_size=crop_size)
-
-    T = 8
-
+    
+    # Load dataset and dataloader
     val_dataset = LLProbeGuidanceDataset(
-        data_root="/home/jack/data/probe_guidance_dataset_june/val",
+        data_root=data_root,
         frames_per_clip=T,
         frame_skip=1,
         frames_per_second=4,
-        transform=transform,
+        transform=make_transforms(crop_size=crop_size),
         is_train=False
     )
-    
-    np.random.seed(42)
-    random_indices = np.random.choice(len(val_dataset), size=250, replace=False).tolist()
 
+    random_indices = np.random.choice(len(val_dataset), size=250, replace=False).tolist()
     fast_subset = Subset(val_dataset, random_indices)
     
     loader = torch.utils.data.DataLoader(
@@ -116,44 +135,32 @@ def main():
         pin_memory=True,
         num_workers=8,
     )
-    
-    # TODO: think about adding "world model simulation" steps. 
-    # So in other words, simulate actually taking actions from the world model for a certain amount of steps.
-    # However, the best way to evaluate this is probably to just look at the entire action trajectories from CEM
-    # and not just the first action. Does the entire action trajectory actually get us closer to the goal state?
-    # The problem with checking the first action is that it makes comparing parameter values choices for the rollout steps
-    # not very meaningful. If the model only has 1 action to get to the goal state, It will just try to jump there right away.
-    # But if it has many rollout steps available, it might select a bunch of random intermediate movements to "stall for time" almost.
-    # Ideally if it has many rollout steps available, it will still find a decent/best path to the goal, and then literally do nothing
-    # with the remaining rollout steps once it reaches the goal (i.e. predict a bunch of [0, 0, 0, 0, 0, 0] actions).
-    
-    compiled_predictor = torch.compile(predictor, dynamic=True)
-    
+   
+    # Preprocess grid search parameters
     # unzip back to keys and values separately
-    keys, values = zip(*PARAM_GRID.items())
+    keys, values = zip(*param_grid.items())
     all_configs = [dict(zip(keys, v)) for v in itertools.product(*values)]
     # topk cannot be greater than # of samples
-    valid_configs = [cfg for cfg in all_configs if cfg["topk"] <= cfg["samples"]]
-    
+    valid_configs = [cfg for cfg in all_configs if cfg["topk"] <= cfg["samples"]] 
     print(f"Total grid combinations to run: {len(valid_configs)}")
     
+    # Get starting time, also useful for storing results later
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    print(f"Starting CEM hyperparameter search at: {timestamp}")
+
     results = []
     
-    for idx, config in enumerate(valid_configs):
+    for idx, cem_config in enumerate(valid_configs):
         print(f"[{idx+1}/{len(valid_configs)}] Running config: {config}")
         
         world_model = WorldModel(
             encoder=encoder,
             predictor=compiled_predictor,
             tokens_per_frame=tokens_per_frame,
-            mpc_args=config,
+            mpc_args=cem_config,
             device=DEVICE,
         )
         
-        # TODO: What is the right way to evaluate the world model's actions? 
-        # Is it only important that the world model's predicted representations match the goal representations?
-        # For the ultrasound dataset, maybe we just care that the states end up the same. Which is synonymous with
-        # reaching the goal state, but only assuming that the patient hasn't moved at all... (i.e. nothing else about the environment changed)
         # NOTE: checking state error should be good for now, but give it more thought!
         inference_latencies_ms = []
         rep_l1_errors = []
@@ -169,11 +176,25 @@ def main():
                 start_time = time.perf_counter()
                 
                 h = world_model.encode(clips)
-                
-                # NOTE: Using only the first two frames in each clip here
-                # TODO: Explore how to vary this appropriately (distance based?)
-                z_n, z_goal = h[:, :tokens_per_frame], h[:, tokens_per_frame:tokens_per_frame*2]
-                s_n, s_goal = states[:, :1], states[:, 1:2]
+
+                # NOTE: randomizing distance from starting frame/state to goal frame/state
+                start_index = random.randint(0, 6)
+                end_index = random.randint(start_index+1, 7)
+
+                #print(f"state => {start_index=}, {end_index=}")
+
+                context_start_token = start_index * tokens_per_frame
+                context_end_token = (start_index + 1) * tokens_per_frame
+
+                #print(f"context => {context_start_token=}, {context_end_token=}")
+
+                goal_start_token = end_index * tokens_per_frame
+                goal_end_token = (end_index + 1) * tokens_per_frame
+
+                #print(f"goal => {goal_start_token=}, {goal_end_token=}")
+
+                z_n, z_goal = h[:, context_start_token:context_end_token], h[:, goal_start_token:goal_end_token]
+                s_n, s_goal = states[:, start_index:start_index+1], states[:, end_index:end_index+1]
                 
                 action_traj, final_rep, final_pose = world_model.evaluate_action_trajectory(
                     rep=z_n, pose=s_n, goal_rep=z_goal
@@ -191,7 +212,7 @@ def main():
                 pose_position_errors.append(pose_error)
     
         record = {
-            **config,
+            **cem_config,
             "mean_inference_latency_ms": np.mean(inference_latencies_ms),
             "std_inference_latency_ms": np.std(inference_latencies_ms),
             "mean_rep_l1_error": np.mean(rep_l1_errors),
@@ -202,7 +223,10 @@ def main():
         results.append(record)
     
     df_results = pd.DataFrame(results)
-    df_results.to_csv("cem_hyperparameter_search.csv", index=False)
+    output_dir_path = Path("hyperparameter_search_outputs") / Path(timestamp)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    output_csv_path = output_dir_path / "hyperparameter_search_results.csv"
+    df_results.to_csv(output_csv_path, index=False)
 
 
 if __name__ == "__main__":
