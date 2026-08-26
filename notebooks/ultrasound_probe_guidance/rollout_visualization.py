@@ -238,18 +238,18 @@ def main():
         us_img_path = os.path.join(us_dir, f"{i:05d}.jpg")
         us_img = torchvision.io.read_image(us_img_path, mode=torchvision.io.ImageReadMode.RGB)
         us_img = us_img.permute(1, 2, 0).numpy()
-        gt_us_img = (rgb_transform(us_img).detach().cpu().numpy().transpose(1, 2, 0) * 255).astype("uint8")
+        gt_us_img = (rgb_transform(us_img).detach().cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
         
         rgb_img_path = os.path.join(rgb_dir, f"{i:05d}.jpg")
         rgb_img = torchvision.io.read_image(rgb_img_path, mode=torchvision.io.ImageReadMode.RGB)
         rgb_img = rgb_img.permute(1, 2, 0).numpy()
-        rgb_img = (rgb_transform(rgb_img).detach().cpu().numpy().transpose(1, 2, 0) * 255).astype("uint8")
+        rgb_img = (rgb_transform(rgb_img).detach().cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
         # Show GT ultrasound image
-        cv2.imshow("Ground truth ultrasound image", gt_us_img)
+        cv2.imshow("Ground truth ultrasound image", gt_us_img[..., ::-1])
         cv2.waitKey(1)
         # Show RGB image
-        cv2.imshow("RGB image", rgb_img)
+        cv2.imshow("RGB image", rgb_img[..., ::-1])
         cv2.waitKey(1)
         # Show decoded prediction image (if available, else placeholder frame)
         if pred_img is not None:
@@ -271,7 +271,10 @@ def main():
                 pred = step_predictor(predictor, rollout_queue, action_queue, state_queue)
                 rollout_queue.append(pred[:, -tokens_per_frame:])
                 pred_vae_latents = bridge(pred[:, -tokens_per_frame:], num_frames=2)
-                pred_img = vae.decode(pred_vae_latents[0])
+                pred_img = vae.decode(pred_vae_latents[0:1]).sample
+                # Denormalize from [-1, 1] to [0, 1] and clamp out-of-bounds values
+                pred_img = ((pred_img + 1.0) / 2.0).clamp(0.0, 1.0)
+                pred_img = (pred_img.squeeze(0).permute(1, 2, 0).detach().cpu().numpy() * 255.0).astype(np.uint8)
             state_queue.append(curr_state)
         prev_state = curr_state
         #print(f"iter {i}: {len(rollout_queue)=}, {len(action_queue)=}, {len(state_queue)=}") 
