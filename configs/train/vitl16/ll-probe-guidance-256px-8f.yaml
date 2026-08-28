@@ -1,6 +1,6 @@
 app: vjepa_ll_probe_guidance
 cpus_per_task: 12
-folder: ./outputs/ll_probe_guidance_vitl_3
+folder: ./outputs/ll_probe_guidance_vitl_rollout_curriculum
 mem_per_gpu: 220G
 nodes: 1 
 tasks_per_node: 1
@@ -17,7 +17,8 @@ data:
   stereo_view: false
   tubelet_size: 2
 loss:
-  auto_steps: 2
+  auto_steps: 8
+  use_rollout_curriculum: true
   loss_exp: 1.0
   normalize_reps: true
   reg_coeff: 0.0
@@ -26,7 +27,7 @@ meta:
   eval_freq: 25
   resume_checkpoint: null
   load_predictor: false
-  pretrain_checkpoint: /home/jack/code/vjepa2_probe_guidance/checkpoints/vitl.pt
+  pretrain_checkpoint: /home/jack/code/vjepa2-probe-guidance/checkpoints/vitl.pt
   context_encoder_key: target_encoder
   target_encoder_key: target_encoder
   save_every_freq: 25

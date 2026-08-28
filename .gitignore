@@ -1,3 +1,5 @@
+wandb/
+
 *.mp4
 
 outputs/

@@ -29,6 +29,7 @@ import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
+import wandb
 
 from app.vjepa_ll_probe_guidance.ll_probe_guidance import init_data, standardize_states, standardize_actions
 from app.vjepa_ll_probe_guidance.transforms import make_transforms
@@ -122,7 +123,8 @@ def main(args, resume_preempt=False):
     cfgs_loss = args.get("loss")
     loss_exp = cfgs_loss.get("loss_exp")
     normalize_reps = cfgs_loss.get("normalize_reps")
-    auto_steps = min(cfgs_loss.get("auto_steps", 1), max_num_frames)
+    auto_steps = cfgs_loss.get("auto_steps", 1)
+    use_rollout_curriculum = cfgs_loss.get("use_rollout_curriculum", False)
     # --
     tokens_per_frame = int((crop_size // patch_size) ** 2)
 
@@ -154,6 +156,14 @@ def main(args, resume_preempt=False):
     # -- init torch distributed backend
     world_size, rank = init_distributed()
     logger.info(f"Initialized (rank/world-size) {rank}/{world_size}")
+
+    if rank == 0:
+        wandb.init(
+            project="vjepa2-ultrasound-ac-predictor",
+            name=args.get("exp_name", f"{model_name}{'-curriculum' if use_rollout_curriculum else ''}"),
+            config=args,
+            resume="allow" if r_file is not None else False,
+        )
 
     # -- set device
     if not torch.cuda.is_available():
@@ -366,7 +376,7 @@ def main(args, resume_preempt=False):
                 h = F.layer_norm(h, (h.size(-1),))
             return h
 
-    def forward_predictions(z, actions, states, extrinsics):
+    def forward_predictions(z, actions, states, extrinsics, curr_auto_steps):
         def _step_predictor(_z, _a, _s, _e):
             if is_state_free:
                 _z = predictor(_z, _a, extrinsics=_e)
@@ -380,10 +390,9 @@ def main(args, resume_preempt=False):
         z_tf = _step_predictor(_z, _a, _s, _e)
 
         _z = torch.cat([z[:, : tokens_per_frame], z_tf[:, : tokens_per_frame]], dim=1)
-        for n in range(1, auto_steps):
-            # TODO: I don't think this will work if auto_steps == max_num_frames.
-            # loss_fn will cause _h to go out of bounds because it will use the last frame/state/action
-            # to make a prediction (which there will be no ground truth for).
+       
+        rollout_steps = min(curr_auto_steps, actions.size(1)) 
+        for n in range(1, rollout_steps):
             _a, _s, _e = actions[:, : n + 1], states[:, : n + 1], extrinsics[:, : n + 1]
             _z_nxt = _step_predictor(_z, _a, _s, _e)[:, -tokens_per_frame:]
             _z = torch.cat([_z, _z_nxt], dim=1)
@@ -416,7 +425,7 @@ def main(args, resume_preempt=False):
                     clips, actions, states, extrinsics = load_clips(sample)
 
                     h = forward_target(clips, val_batch_size)
-                    z_tf, z_ar = forward_predictions(h, actions, states, extrinsics)
+                    z_tf, z_ar = forward_predictions(h, actions, states, extrinsics, curr_auto_steps)
 
                     jloss = loss_fn(z_tf, h)
                     sloss = loss_fn(z_ar, h)
@@ -435,6 +444,18 @@ def main(args, resume_preempt=False):
     # -- TRAINING LOOP
     for epoch in range(start_epoch, num_epochs):
         logger.info("Epoch %d" % (epoch + 1))
+
+        if use_rollout_curriculum:
+            if 0 <= epoch < int(num_epochs * 0.25):
+                curr_auto_steps = min(2, auto_steps)
+            elif int(num_epochs * 0.25) <= epoch < int(num_epochs * 0.50):
+                curr_auto_steps = min(4, auto_steps)
+            else:
+                curr_auto_steps = auto_steps
+        else:
+            curr_auto_steps = auto_steps
+
+        logger.info(f"Active rollout horizon (auto_steps): {curr_auto_steps}")
 
         loss_meter = AverageMeter()
         jloss_meter = AverageMeter()
@@ -482,7 +503,7 @@ def main(args, resume_preempt=False):
                 # Step 1. Forward
                 with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):
                     h = forward_target(clips, train_batch_size)
-                    z_tf, z_ar = forward_predictions(h, actions, states, extrinsics)
+                    z_tf, z_ar = forward_predictions(h, actions, states, extrinsics, curr_auto_steps)
                     jloss = loss_fn(z_tf, h)
                     sloss = loss_fn(z_ar, h)
                     loss = jloss + sloss
@@ -526,6 +547,20 @@ def main(args, resume_preempt=False):
             # -- Logging
             def log_stats():
                 csv_logger.log(epoch + 1, itr, loss, iter_elapsed_time_ms, gpu_etime_ms, data_elapsed_time_ms)
+
+                if rank == 0:
+                    global_step = epoch * ipe + itr
+                    wandb.log({
+                        "train/loss": loss,
+                        "train/jloss": jloss,
+                        "train/sloss": sloss,
+                        "train/lr": _new_lr,
+                        "train/wd": _new_wd,
+                        "train/auto_steps": curr_auto_steps,
+                        "train/iter_time_ms": iter_elapsed_time_ms,
+                        "train/gpu_time_ms": gpu_etime_ms,
+                    }, step=global_step)
+
                 if (itr % log_freq == 0) or (itr == ipe - 1) or np.isnan(loss) or np.isinf(loss):
                     logger.info(
                         "[%d, %5d] loss: %.3f [%.2f, %.2f] "
@@ -559,7 +594,7 @@ def main(args, resume_preempt=False):
         
         if rank == 0 and is_eval_epoch:
             logger.info("Starting validation...")
-            val_loss_avg, _, _ = validate(
+            val_loss_avg, val_jloss_avg, val_sloss_avg = validate(
                 encoder.module, 
                 predictor.module, 
                 target_encoder.module, 
@@ -567,6 +602,13 @@ def main(args, resume_preempt=False):
                 device, 
             )
             logger.info("avg. val loss %.3f" % val_loss_avg)
+
+            wandb.log({
+                "val/loss": val_loss_avg,
+                "val/jloss": val_jloss_avg,
+                "val/sloss": val_sloss_avg,
+                "epoch": epoch + 1,
+            }, step=(epoch + 1) * ipe)
 
         # Checkpointing
         if epoch % CHECKPOINT_FREQ == 0 or epoch == (num_epochs - 1):
@@ -583,4 +625,7 @@ def main(args, resume_preempt=False):
 
         # If there are multiple GPUs, wait for rank 0 GPU to finish validation and then continue
         if world_size > 1:
-            torch.distributed.barrier()
+            torch.distributed.barrier() 
+
+    if rank == 0:
+        wandb.finish()
