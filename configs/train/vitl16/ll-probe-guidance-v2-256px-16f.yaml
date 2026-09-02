@@ -1,0 +1,58 @@
+app: vjepa_ll_probe_guidance_v2
+cpus_per_task: 12
+folder: ./outputs/ll_probe_guidance_v2_vitl
+mem_per_gpu: 220G
+nodes: 1 
+tasks_per_node: 1
+data:
+  data_root: /home/jack/code/paradigm_world_model_demo/recordings
+  val_data_root: null
+  batch_size: 2
+  val_batch_size: 4
+  frames_per_clip: 16
+  fps: 4
+  num_workers: 4
+  patch_size: 16
+  crop_size: 256
+  pin_mem: true
+  stereo_view: false
+  tubelet_size: 2
+  pose_source: tip
+  stats_file: null
+loss:
+  auto_steps: 8
+  use_rollout_curriculum: true
+  loss_exp: 1.0
+  normalize_reps: true
+  reg_coeff: 0.0
+meta:
+  dtype: bfloat16
+  eval_freq: 25
+  resume_checkpoint: null
+  load_predictor: false
+  pretrain_checkpoint: /home/jack/code/vjepa2-probe-guidance/checkpoints/vitl.pt
+  context_encoder_key: target_encoder
+  target_encoder_key: target_encoder
+  save_every_freq: 25
+  seed: 239
+  use_sdpa: true
+model:
+  model_name: vit_large
+  predictor_type: "sfac"
+  patch_size: 16
+  pred_depth: 12 
+  pred_embed_dim: 768
+  pred_num_heads: 12
+  action_embed_dim: 6
+  use_extrinsics: false
+  use_rope: true
+optimization:
+  anneal: 15
+  epochs: 100
+  final_lr: 0.0
+  final_weight_decay: 0.04
+  ipe: 100
+  lr: 0.0001
+  start_lr: 0.00001
+  warmup: 10
+  weight_decay: 0.04
