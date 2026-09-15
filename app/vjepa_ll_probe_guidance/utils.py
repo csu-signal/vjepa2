@@ -24,6 +24,12 @@ def init_video_model(
 ):
     if model_name == "vit_large":
         encoder = vit_large(patch_size=patch_size, img_size=crop_size, num_frames=max_num_frames, **kwargs)
+    elif model_name == "vit_base":
+        encoder = vit_base(patch_size=patch_size, img_size=crop_size, num_frames=max_num_frames, **kwargs)
+    elif model_name == "vit_huge":
+        encoder = vit_huge(patch_size=patch_size, img_size=crop_size, num_frames=max_num_frames, **kwargs)
+    elif model_name == "vit_giant":
+        encoder = vit_giant(patch_size=patch_size, img_size=crop_size, num_frames=max_num_frames, **kwargs)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 

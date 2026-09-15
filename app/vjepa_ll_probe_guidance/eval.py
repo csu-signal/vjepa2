@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 
-from app.vjepa_ll_probe_guidance.ll_probe_guidance import LLProbeGuidanceDataset
+from app.vjepa_ll_probe_guidance.ll_probe_guidance import LLProbeGuidanceDataset, standardize_actions, standardize_states, load_stats_file
 from app.vjepa_ll_probe_guidance.transforms import make_transforms
 from app.vjepa_ll_probe_guidance.utils import init_video_model, load_checkpoint, load_pretrained
 from src.utils.distributed import init_distributed
@@ -18,14 +18,13 @@ from src.utils.logging import AverageMeter, get_logger, gpu_timer
 logger = get_logger(__name__, force=True)
 
 
-def load_state_dict_with_ddp_fix(model, state_dict):
+def load_state_dict_with_ddp_fix(model, state_dict, strict=False):
     new_state_dict = {}
     for k, v in state_dict.items():
-        # Remove 'module.' prefix if it exists
         new_key = k.replace("module.", "")
         new_state_dict[new_key] = v
 
-    model.load_state_dict(new_state_dict, strict=True)
+    model.load_state_dict(new_state_dict, strict=strict)
     return model
 
 
@@ -56,14 +55,19 @@ def main(args):
 
     # -- DATA
     cfgs_data = args.get("data")
-    data_root = cfgs_data.get("data_root")
+    data_root = cfgs_data.get("val_data_root") or cfgs_data.get("data_root")
     max_num_frames = cfgs_data.get("frames_per_clip", 16)
-    batch_size = cfgs_data.get("batch_size")
+    batch_size = cfgs_data.get("val_batch_size") or cfgs_data.get("batch_size")
     tubelet_size = cfgs_data.get("tubelet_size", 2)
     fps = cfgs_data.get("fps", 4)
     crop_size = cfgs_data.get("crop_size", 256)
     patch_size = cfgs_data.get("patch_size", 16)
     num_workers = cfgs_data.get("num_workers", 4)
+    pose_source = cfgs_data.get("pose_source", "centroid")
+    stats_file = cfgs_data.get("stats_file", None)
+
+    if stats_file and os.path.exists(stats_file):
+        load_stats_file(stats_file)
 
     # -- LOSS
     cfgs_loss = args.get("loss")
@@ -75,6 +79,11 @@ def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         torch.cuda.set_device(device)
+
+    use_rope = cfgs_model.get("use_rope", True)
+    use_silu = cfgs_model.get("use_silu", False)
+    use_pred_silu = cfgs_model.get("use_pred_silu", False)
+    wide_silu = cfgs_model.get("wide_silu", True)
 
     # -- init model
     encoder, predictor = init_video_model(
@@ -92,6 +101,10 @@ def main(args):
         pred_is_frame_causal=pred_is_frame_causal,
         use_extrinsics=use_extrinsics,
         use_sdpa=use_sdpa,
+        use_rope=use_rope,
+        use_silu=use_silu,
+        use_pred_silu=use_pred_silu,
+        wide_silu=wide_silu,
     )
     target_encoder = copy.deepcopy(encoder)
 
@@ -104,7 +117,9 @@ def main(args):
         frame_skip=1, 
         frames_per_second=fps,
         transform=transform,
-        is_train=False
+        is_train=False,
+        pose_source=pose_source,
+        stats_file=stats_file,
     )
     eval_loader = torch.utils.data.DataLoader(
         eval_dataset,
@@ -140,8 +155,8 @@ def main(args):
     with torch.no_grad():
         for itr, sample in enumerate(eval_loader):
             clips = sample[0].to(device, non_blocking=True)
-            actions = sample[1].to(device, dtype=torch.float, non_blocking=True)
-            states = sample[2].to(device, dtype=torch.float, non_blocking=True)
+            actions = standardize_actions(sample[1].to(device, dtype=torch.float, non_blocking=True))
+            states = standardize_states(sample[2].to(device, dtype=torch.float, non_blocking=True))
             extrinsics = sample[3].to(device, dtype=torch.float, non_blocking=True)
 
             with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):

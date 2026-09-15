@@ -31,7 +31,7 @@ from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 import wandb
 
-from app.vjepa_ll_probe_guidance.ll_probe_guidance import init_data, standardize_states, standardize_actions
+from app.vjepa_ll_probe_guidance.ll_probe_guidance import init_data, standardize_states, standardize_actions, load_stats_file
 from app.vjepa_ll_probe_guidance.transforms import make_transforms
 from app.vjepa_ll_probe_guidance.utils import init_opt, init_video_model, load_checkpoint, load_pretrained
 from src.utils.distributed import init_distributed
@@ -118,6 +118,11 @@ def main(args, resume_preempt=False):
     pin_mem = cfgs_data.get("pin_mem", False)
     num_workers = cfgs_data.get("num_workers", 4)
     persistent_workers = cfgs_data.get("persistent_workers", True)
+    pose_source = cfgs_data.get("pose_source", "centroid")
+    stats_file = cfgs_data.get("stats_file", None)
+
+    if stats_file and os.path.exists(stats_file):
+        load_stats_file(stats_file)
 
     # -- LOSS
     cfgs_loss = args.get("loss")
@@ -173,6 +178,7 @@ def main(args, resume_preempt=False):
         torch.cuda.set_device(device)
 
     # -- log/checkpointing paths
+    os.makedirs(folder, exist_ok=True)
     log_file = os.path.join(folder, f"log_r{rank}.csv")
     latest_path = os.path.join(folder, "latest.pt")
     resume_path = os.path.join(folder, r_file) if r_file is not None else latest_path
@@ -233,7 +239,7 @@ def main(args, resume_preempt=False):
         data_root=data_root,
         batch_size=train_batch_size,
         frames_per_clip=max_num_frames,
-        frame_skip=1, # NOTE: hardcoded to 1 here because of jankiness for aligning states/actions to frames (which get duplicated!)
+        frame_skip=1,
         fps=fps,
         transform=transform,
         collator=video_collator,
@@ -242,14 +248,15 @@ def main(args, resume_preempt=False):
         pin_mem=pin_mem,
         persistent_workers=persistent_workers,
         rank=rank,
+        pose_source=pose_source,
+        stats_file=stats_file,
     )
 
     val_loader = None
-    if rank == 0:
-        val_data_root = cfgs_data.get("val_data_root", None)
+    if rank == 0 and val_data_root is not None:
         val_loader, _ = init_data(
             data_root=val_data_root,
-            batch_size=val_batch_size,
+            batch_size=val_batch_size if val_batch_size is not None else train_batch_size,
             frames_per_clip=max_num_frames,
             frame_skip=1,
             fps=fps,
@@ -260,7 +267,9 @@ def main(args, resume_preempt=False):
             pin_mem=pin_mem,
             persistent_workers=persistent_workers,
             rank=0,
-            is_train=False
+            is_train=False,
+            pose_source=pose_source,
+            stats_file=stats_file,
         )
 
     _dlen = len(unsupervised_loader)
@@ -286,9 +295,10 @@ def main(args, resume_preempt=False):
         betas=betas,
         eps=eps,
     )
-    encoder = DistributedDataParallel(encoder, static_graph=True)
-    predictor = DistributedDataParallel(predictor, static_graph=False, find_unused_parameters=True)
-    target_encoder = DistributedDataParallel(target_encoder)
+    if torch.distributed.is_initialized():
+        encoder = DistributedDataParallel(encoder, static_graph=True)
+        predictor = DistributedDataParallel(predictor, static_graph=False, find_unused_parameters=True)
+        target_encoder = DistributedDataParallel(target_encoder)
     for p in target_encoder.parameters():
         p.requires_grad = False
 
@@ -347,7 +357,8 @@ def main(args, resume_preempt=False):
             logger.info(f"Encountered exception when saving checkpoint: {e}")
 
     logger.info("Initializing loader...")
-    unsupervised_sampler.set_epoch(start_epoch)
+    if unsupervised_sampler is not None:
+        unsupervised_sampler.set_epoch(start_epoch)
     loader = iter(unsupervised_loader)
 
     if skip_batches > 0:
@@ -405,12 +416,12 @@ def main(args, resume_preempt=False):
 
     def load_clips(sample):
         clips = sample[0].to(device, non_blocking=True)  # [B C T H W]
-        actions = standardize_actions(sample[1]).to(device, dtype=torch.float, non_blocking=True)  # [B T-1 6]
-        states = standardize_states(sample[2]).to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
+        actions = sample[1].to(device, dtype=torch.float, non_blocking=True)  # [B T-1 6]
+        states = sample[2].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
         extrinsics = sample[3].to(device, dtype=torch.float, non_blocking=True)  # [B T 6]
-        return (clips, actions, states, extrinsics)
+        return (clips, standardize_actions(actions), standardize_states(states), extrinsics)
 
-    def validate(encoder, predictor, target_encoder, loader, device):
+    def validate(encoder, predictor, target_encoder, loader, device, curr_auto_steps):
         encoder.eval()
         predictor.eval()
         # Dont bother placing target_encoder into eval() mode TODO verify more closely if that's okay
@@ -476,7 +487,8 @@ def main(args, resume_preempt=False):
                     iter_successful = True
                 except StopIteration:
                     logger.info("Exhausted data loaders. Refreshing...")
-                    unsupervised_sampler.set_epoch(epoch)
+                    if unsupervised_sampler is not None:
+                        unsupervised_sampler.set_epoch(epoch)
                     loader = iter(unsupervised_loader)
                 except Exception as e:
                     NUM_RETRIES = 5
@@ -592,14 +604,15 @@ def main(args, resume_preempt=False):
         # Validation
         is_eval_epoch = (epoch % eval_freq == 0) or (epoch == num_epochs - 1)
         
-        if rank == 0 and is_eval_epoch:
+        if rank == 0 and is_eval_epoch and val_loader is not None:
             logger.info("Starting validation...")
             val_loss_avg, val_jloss_avg, val_sloss_avg = validate(
-                encoder.module, 
-                predictor.module, 
-                target_encoder.module, 
+                encoder.module if hasattr(encoder, "module") else encoder, 
+                predictor.module if hasattr(predictor, "module") else predictor, 
+                target_encoder.module if hasattr(target_encoder, "module") else target_encoder, 
                 val_loader, 
-                device, 
+                device,
+                curr_auto_steps,
             )
             logger.info("avg. val loss %.3f" % val_loss_avg)
 
@@ -610,18 +623,18 @@ def main(args, resume_preempt=False):
                 "epoch": epoch + 1,
             }, step=(epoch + 1) * ipe)
 
+            if val_loss_avg < best_val_loss:
+                best_path = os.path.join(folder, "best.pt")
+                save_checkpoint(epoch + 1, best_path)
+                best_val_loss = val_loss_avg
+
         # Checkpointing
         if epoch % CHECKPOINT_FREQ == 0 or epoch == (num_epochs - 1):
-            # Save latest model
             save_checkpoint(epoch + 1, latest_path)
             if save_every_freq > 0 and epoch % save_every_freq == 0:
                 save_every_file = f"e{epoch}.pt"
                 save_every_path = os.path.join(folder, save_every_file)
                 save_checkpoint(epoch + 1, save_every_path)
-            if val_loss_avg < best_val_loss:
-                best_path = os.path.join(folder, "best.pt")
-                save_checkpoint(epoch + 1, best_path)
-                best_val_loss = val_loss_avg
 
         # If there are multiple GPUs, wait for rank 0 GPU to finish validation and then continue
         if world_size > 1:

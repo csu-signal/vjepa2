@@ -160,18 +160,18 @@ def cem(
 
 def euler_to_matrix_xyz_degrees(euler_deg):
     """
-    Converts [B, 3] Euler angles in degrees (order 'xyz') to [B, 3, 3] rotation matrices.
+    Converts [B, 3] Euler angles in degrees (order 'xyz', matching SciPy) to [B, 3, 3] rotation matrices.
     Runs 100% on CUDA in pure PyTorch.
     """
     rad = torch.deg2rad(euler_deg)
     cx, cy, cz = torch.cos(rad[:, 0]), torch.cos(rad[:, 1]), torch.cos(rad[:, 2])
     sx, sy, sz = torch.sin(rad[:, 0]), torch.sin(rad[:, 1]), torch.sin(rad[:, 2])
 
-    # Construct Extrinsic XYZ rotation matrix
+    # R = Rz @ Ry @ Rx (SciPy intrinsic 'xyz' convention)
     R = torch.stack([
-        cy * cz, -cy * sz, sy,
-        cx * sz + cz * sx * sy, cx * cz - sx * sy * sz, -cy * sx,
-        sx * sz - cx * cz * sy, cz * sx + cx * sy * sz, cx * cy
+        cy * cz, cz * sx * sy - cx * sz, cx * cz * sy + sx * sz,
+        cy * sz, cx * cz + sx * sy * sz, -cz * sx + cx * sy * sz,
+        -sy, cy * sx, cx * cy
     ], dim=-1).reshape(-1, 3, 3)
     
     return R
@@ -180,15 +180,12 @@ def matrix_to_euler_xyz_degrees(R):
     """
     Converts [B, 3, 3] rotation matrices back to [B, 3] Euler angles in degrees ('xyz').
     """
-    sy = R[:, 0, 2]
-    # Clamp to avoid numerical precision errors near gimbal lock
+    sy = -R[:, 2, 0]
     sy = torch.clamp(sy, -0.999999, 0.999999)
     
-    cy = torch.sqrt(1.0 - sy ** 2)
-    
-    x = torch.atan2(-R[:, 1, 2], R[:, 2, 2])
-    y = torch.atan2(sy, cy)
-    z = torch.atan2(-R[:, 0, 1], R[:, 0, 0])
+    x = torch.atan2(R[:, 2, 1], R[:, 2, 2])
+    y = torch.asin(sy)
+    z = torch.atan2(R[:, 1, 0], R[:, 0, 0])
 
     euler_rad = torch.stack([x, y, z], dim=-1)
     return torch.rad2deg(euler_rad)

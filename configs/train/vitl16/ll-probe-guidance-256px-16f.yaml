@@ -1,12 +1,13 @@
-app: vjepa_ll_probe_guidance_v2
+app: vjepa_ll_probe_guidance
 cpus_per_task: 12
-folder: ./outputs/ll_probe_guidance_v2_vitl
+folder: ./outputs/ll_probe_guidance_vitl_16f
 mem_per_gpu: 220G
 nodes: 1 
 tasks_per_node: 1
 data:
-  data_root: /home/jack/code/paradigm_world_model_demo/recordings
-  val_data_root: null
+  data_root: /home/jack/data/ll_probe_tracking_dataset_v1/train
+  val_data_root: /home/jack/data/ll_probe_tracking_dataset_v1/val
+  stats_file: /home/jack/data/ll_probe_tracking_dataset_v1/stats_probe_local.json
   batch_size: 2
   val_batch_size: 4
   frames_per_clip: 16
@@ -17,8 +18,7 @@ data:
   pin_mem: true
   stereo_view: false
   tubelet_size: 2
-  pose_source: tip
-  stats_file: null
+  pose_source: centroid
 loss:
   auto_steps: 8
   use_rollout_curriculum: true
@@ -38,7 +38,7 @@ meta:
   use_sdpa: true
 model:
   model_name: vit_large
-  predictor_type: "sfac"
+  predictor_type: "ac"
   patch_size: 16
   pred_depth: 12 
   pred_embed_dim: 768
