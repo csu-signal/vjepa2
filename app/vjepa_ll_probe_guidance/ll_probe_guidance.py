@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_AVG_FPS = 15.0
 
+# Default 6D probe tip offset: 192mm down +X from centroid, zero rotation [x, y, z, roll, pitch, yaw]
+DEFAULT_PROBE_TIP_OFFSET = [0.192, 0.0, 0.0, 0.0, 0.0, 0.0]
+
 # Fallback normalization statistics in the probe's local coordinate frame
 DEFAULT_ACTION_MEAN = np.array(
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -94,6 +97,7 @@ class LLProbeGuidanceDataset(Dataset):
         transform=None,
         is_train: bool = True,
         pose_source: str = "centroid",  # "centroid" or "tip"
+        probe_tip_offset: Optional[Union[List[float], Tuple[float, ...], np.ndarray]] = None,
         stats_file: Optional[str] = None,
         avg_fps: float = DEFAULT_AVG_FPS,
     ):
@@ -106,6 +110,31 @@ class LLProbeGuidanceDataset(Dataset):
         self.pose_source = pose_source
         self.avg_fps = avg_fps
         self._video_readers: Dict[str, Any] = {}
+
+        if self.pose_source == "tip" and probe_tip_offset is None:
+            probe_tip_offset = DEFAULT_PROBE_TIP_OFFSET
+
+        if probe_tip_offset is not None:
+            offset_arr = np.array(probe_tip_offset, dtype=np.float32).flatten()
+            if len(offset_arr) != 6:
+                raise ValueError(
+                    f"probe_tip_offset must be a 6D vector [x, y, z, roll, pitch, yaw], got {probe_tip_offset}"
+                )
+            self.probe_tip_offset = offset_arr
+            self._tip_p_offset = offset_arr[:3]
+            self._tip_rpy_offset = offset_arr[3:]
+            self._tip_R_offset = Rotation.from_euler("xyz", self._tip_rpy_offset, degrees=True).as_matrix()
+            self._has_tip_rot_offset = not np.allclose(self._tip_rpy_offset, 0.0)
+            logger.info(
+                f"LLProbeGuidanceDataset initialized with 6D probe tip offset: "
+                f"xyz={self._tip_p_offset.tolist()} m, rpy={self._tip_rpy_offset.tolist()} deg"
+            )
+        else:
+            self.probe_tip_offset = None
+            self._tip_p_offset = None
+            self._tip_rpy_offset = None
+            self._tip_R_offset = None
+            self._has_tip_rot_offset = False
 
         if stats_file and os.path.exists(stats_file):
             load_stats_file(stats_file)
@@ -192,23 +221,71 @@ class LLProbeGuidanceDataset(Dataset):
             df_valid_us = df[(df["frame_idx_us"] >= 1) & (df["frame_idx_us"] <= total_frames)].copy()
             df_valid_us["us_frame_idx"] = df_valid_us["frame_idx_us"].astype(int) - 1
 
-            # Select pose column prefix based on pose_source
-            prefix = "tip" if self.pose_source == "tip" and "tip_x" in df.columns else "centroid"
-            pos_cols = [f"{prefix}_x", f"{prefix}_y", f"{prefix}_z"]
-            rot_cols = [f"{prefix}_roll", f"{prefix}_pitch", f"{prefix}_yaw"]
+            if self.pose_source == "tip":
+                if self.probe_tip_offset is not None:
+                    # Dynamically calculate tip pose from centroid pose and 6D offset vector
+                    pos_cols = ["centroid_x", "centroid_y", "centroid_z"]
+                    rot_cols = ["centroid_roll", "centroid_pitch", "centroid_yaw"]
+                    grouped = df_valid_us.groupby("us_frame_idx").agg({
+                        pos_cols[0]: "last",
+                        pos_cols[1]: "last",
+                        pos_cols[2]: "last",
+                        rot_cols[0]: "last",
+                        rot_cols[1]: "last",
+                        rot_cols[2]: "last",
+                        "tracking_valid": "max",
+                    }).reindex(range(total_frames))
 
-            grouped = df_valid_us.groupby("us_frame_idx").agg({
-                pos_cols[0]: "last",
-                pos_cols[1]: "last",
-                pos_cols[2]: "last",
-                rot_cols[0]: "last",
-                rot_cols[1]: "last",
-                rot_cols[2]: "last",
-                "tracking_valid": "max",
-            }).reindex(range(total_frames))
+                    c_pos = grouped[pos_cols].values.astype(np.float32)
+                    c_rot = grouped[rot_cols].values.astype(np.float32)
+                    tracking = grouped["tracking_valid"].fillna(0).values.astype(np.uint8)
 
-            states = grouped[pos_cols + rot_cols].values.astype(np.float32)
-            tracking = grouped["tracking_valid"].fillna(0).values.astype(np.uint8)
+                    valid_mask = (tracking == 1) & (~np.isnan(c_pos).any(axis=1)) & (~np.isnan(c_rot).any(axis=1))
+                    t_pos = np.full_like(c_pos, np.nan)
+                    t_rot = np.full_like(c_rot, np.nan)
+
+                    if np.any(valid_mask):
+                        R_c = Rotation.from_euler("xyz", c_rot[valid_mask], degrees=True).as_matrix()
+                        t_pos[valid_mask] = c_pos[valid_mask] + (R_c @ self._tip_p_offset)
+                        if self._has_tip_rot_offset:
+                            R_tip = R_c @ self._tip_R_offset
+                            t_rot[valid_mask] = Rotation.from_matrix(R_tip).as_euler("xyz", degrees=True)
+                        else:
+                            t_rot[valid_mask] = c_rot[valid_mask]
+
+                    states = np.concatenate([t_pos, t_rot], axis=1).astype(np.float32)
+                elif "tip_x" in df.columns:
+                    pos_cols = ["tip_x", "tip_y", "tip_z"]
+                    rot_cols = ["tip_roll", "tip_pitch", "tip_yaw"]
+                    grouped = df_valid_us.groupby("us_frame_idx").agg({
+                        pos_cols[0]: "last",
+                        pos_cols[1]: "last",
+                        pos_cols[2]: "last",
+                        rot_cols[0]: "last",
+                        rot_cols[1]: "last",
+                        rot_cols[2]: "last",
+                        "tracking_valid": "max",
+                    }).reindex(range(total_frames))
+                    states = grouped[pos_cols + rot_cols].values.astype(np.float32)
+                    tracking = grouped["tracking_valid"].fillna(0).values.astype(np.uint8)
+                else:
+                    raise ValueError(
+                        f"Session {session_path} missing tip columns in trajectory.csv and no probe_tip_offset was provided."
+                    )
+            else:
+                pos_cols = ["centroid_x", "centroid_y", "centroid_z"]
+                rot_cols = ["centroid_roll", "centroid_pitch", "centroid_yaw"]
+                grouped = df_valid_us.groupby("us_frame_idx").agg({
+                    pos_cols[0]: "last",
+                    pos_cols[1]: "last",
+                    pos_cols[2]: "last",
+                    rot_cols[0]: "last",
+                    rot_cols[1]: "last",
+                    rot_cols[2]: "last",
+                    "tracking_valid": "max",
+                }).reindex(range(total_frames))
+                states = grouped[pos_cols + rot_cols].values.astype(np.float32)
+                tracking = grouped["tracking_valid"].fillna(0).values.astype(np.uint8)
 
             nan_mask = np.isnan(states).any(axis=1)
             tracking[nan_mask] = 0
@@ -363,6 +440,7 @@ def init_data(
     is_train: bool = True,
     persistent_workers: bool = True,
     pose_source: str = "centroid",
+    probe_tip_offset: Optional[Union[List[float], Tuple[float, ...], np.ndarray]] = None,
     stats_file: Optional[str] = None,
     transform=None,
     collator=None,
@@ -381,6 +459,7 @@ def init_data(
         transform=transform,
         is_train=is_train,
         pose_source=pose_source,
+        probe_tip_offset=probe_tip_offset,
         stats_file=stats_file,
     )
 

@@ -7,7 +7,7 @@ tasks_per_node: 1
 data:
   data_root: /home/jack/data/ll_probe_tracking_dataset_v1/train
   val_data_root: /home/jack/data/ll_probe_tracking_dataset_v1/val
-  stats_file: /home/jack/data/ll_probe_tracking_dataset_v1/stats_probe_local.json
+  stats_file: /home/jack/data/ll_probe_tracking_dataset_v1/stats_probe_local_tip.json
   batch_size: 2
   val_batch_size: 4
   frames_per_clip: 16
@@ -18,7 +18,10 @@ data:
   pin_mem: true
   stereo_view: false
   tubelet_size: 2
-  pose_source: centroid
+  pose_source: tip
+  # 6D probe tip offset: [x, y, z] in meters, [roll, pitch, yaw] in degrees
+  # 192mm down +X from the centroid:
+  probe_tip_offset: [0.192, 0.0, 0.0, 0.0, 0.0, 0.0]
 loss:
   auto_steps: 8
   use_rollout_curriculum: true

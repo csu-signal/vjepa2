@@ -119,6 +119,8 @@ def main(args, resume_preempt=False):
     num_workers = cfgs_data.get("num_workers", 4)
     persistent_workers = cfgs_data.get("persistent_workers", True)
     pose_source = cfgs_data.get("pose_source", "centroid")
+    probe_tip_offset = cfgs_data.get("probe_tip_offset", None)
+    logger.info(f"Using pose_source: {pose_source} | probe_tip_offset: {probe_tip_offset}")
     stats_file = cfgs_data.get("stats_file", None)
 
     if stats_file and os.path.exists(stats_file):
@@ -249,6 +251,7 @@ def main(args, resume_preempt=False):
         persistent_workers=persistent_workers,
         rank=rank,
         pose_source=pose_source,
+        probe_tip_offset=probe_tip_offset,
         stats_file=stats_file,
     )
 
@@ -269,6 +272,7 @@ def main(args, resume_preempt=False):
             rank=0,
             is_train=False,
             pose_source=pose_source,
+            probe_tip_offset=probe_tip_offset,
             stats_file=stats_file,
         )
 

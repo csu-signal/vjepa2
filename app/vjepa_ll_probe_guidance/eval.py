@@ -64,6 +64,8 @@ def main(args):
     patch_size = cfgs_data.get("patch_size", 16)
     num_workers = cfgs_data.get("num_workers", 4)
     pose_source = cfgs_data.get("pose_source", "centroid")
+    probe_tip_offset = cfgs_data.get("probe_tip_offset", None)
+    logger.info(f"Using pose_source: {pose_source} | probe_tip_offset: {probe_tip_offset}")
     stats_file = cfgs_data.get("stats_file", None)
 
     if stats_file and os.path.exists(stats_file):
@@ -119,6 +121,7 @@ def main(args):
         transform=transform,
         is_train=False,
         pose_source=pose_source,
+        probe_tip_offset=probe_tip_offset,
         stats_file=stats_file,
     )
     eval_loader = torch.utils.data.DataLoader(

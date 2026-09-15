@@ -1,36 +1,42 @@
 app: vjepa_ll_probe_guidance
 cpus_per_task: 12
-folder: ./outputs/ll_probe_guidance_vitl_rollout_curriculum
+folder: ./outputs/ll_probe_guidance_vitl_8f
 mem_per_gpu: 220G
 nodes: 1 
 tasks_per_node: 1
 data:
-  data_root: /home/jack/data/probe_guidance_dataset_june/train
-  val_data_root: /home/jack/data/probe_guidance_dataset_june/val
+  data_root: /home/jack/data/ll_probe_tracking_dataset_v1/train
+  val_data_root: /home/jack/data/ll_probe_tracking_dataset_v1/val
+  stats_file: /home/jack/data/ll_probe_tracking_dataset_v1/stats_probe_local_tip.json
   batch_size: 4
   val_batch_size: 16
   frames_per_clip: 8
   fps: 4
   num_workers: 8
   patch_size: 16
+  crop_size: 256
   pin_mem: true
   stereo_view: false
   tubelet_size: 2
+  pose_source: tip
+  # 6D probe tip offset: [x, y, z] in meters, [roll, pitch, yaw] in degrees
+  # 192mm down +X from the centroid:
+  probe_tip_offset: [0.192, 0.0, 0.0, 0.0, 0.0, 0.0]
 loss:
-  auto_steps: 8
+  auto_steps: 4
   use_rollout_curriculum: true
   loss_exp: 1.0
   normalize_reps: true
   reg_coeff: 0.0
 meta:
   dtype: bfloat16
-  eval_freq: 25
+  eval_freq: 50
   resume_checkpoint: null
   load_predictor: false
   pretrain_checkpoint: /home/jack/code/vjepa2-probe-guidance/checkpoints/vitl.pt
   context_encoder_key: target_encoder
   target_encoder_key: target_encoder
-  save_every_freq: 25
+  save_every_freq: 50
   seed: 239
   use_sdpa: true
 model:
@@ -45,11 +51,11 @@ model:
   use_rope: true
 optimization:
   anneal: 15
-  epochs: 315
+  epochs: 250
   final_lr: 0.0
   final_weight_decay: 0.04
-  ipe: 300
+  ipe: 100
   lr: 0.0001
   start_lr: 0.00001
-  warmup: 15
+  warmup: 10
   weight_decay: 0.04

@@ -1,7 +1,11 @@
 import os
+import sys
 import json
 import argparse
 import numpy as np
+
+# Ensure vjepa2 parent directory is in sys.path for direct script execution
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from app.vjepa_ll_probe_guidance.ll_probe_guidance import LLProbeGuidanceDataset
 
@@ -9,6 +13,7 @@ from app.vjepa_ll_probe_guidance.ll_probe_guidance import LLProbeGuidanceDataset
 def calculate_probe_local_stats(
     data_root: str,
     pose_source: str = "centroid",
+    probe_tip_offset=None,
     fps: int = 4,
     frames_per_clip: int = 16,
     output_json: str = None,
@@ -19,6 +24,7 @@ def calculate_probe_local_stats(
         frames_per_second=fps,
         transform=None,
         pose_source=pose_source,
+        probe_tip_offset=probe_tip_offset,
         is_train=True,
     )
 
@@ -66,6 +72,7 @@ def calculate_probe_local_stats(
         stats_dict = {
             "coordinate_frame": "probe_local",
             "pose_source": pose_source,
+            "probe_tip_offset": dataset.probe_tip_offset.tolist() if dataset.probe_tip_offset is not None else None,
             "fps": fps,
             "frames_per_clip": frames_per_clip,
             "num_actions": int(len(all_actions)),
@@ -86,6 +93,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Calculate normalization stats in probe local coordinate frame.")
     parser.add_argument("--dataset-train-path", type=str, required=True, help="Path to training data directory")
     parser.add_argument("--pose-source", type=str, default="centroid", choices=["centroid", "tip"], help="Pose source")
+    parser.add_argument(
+        "--probe-tip-offset",
+        type=float,
+        nargs=6,
+        default=None,
+        help="6D probe tip offset [x y z roll pitch yaw] in meters and degrees",
+    )
     parser.add_argument("--fps", type=int, default=4, help="Target frames per second")
     parser.add_argument("--frames-per-clip", type=int, default=16, help="Frames per clip")
     parser.add_argument("--output-json", type=str, default=None, help="Output JSON path")
@@ -94,6 +108,7 @@ if __name__ == "__main__":
     calculate_probe_local_stats(
         args.dataset_train_path,
         pose_source=args.pose_source,
+        probe_tip_offset=args.probe_tip_offset,
         fps=args.fps,
         frames_per_clip=args.frames_per_clip,
         output_json=args.output_json,
