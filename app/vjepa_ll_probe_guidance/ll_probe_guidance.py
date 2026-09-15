@@ -109,7 +109,6 @@ class LLProbeGuidanceDataset(Dataset):
         self.is_train = is_train
         self.pose_source = pose_source
         self.avg_fps = avg_fps
-        self._video_readers: Dict[str, Any] = {}
 
         if self.pose_source == "tip" and probe_tip_offset is None:
             probe_tip_offset = DEFAULT_PROBE_TIP_OFFSET
@@ -370,20 +369,14 @@ class LLProbeGuidanceDataset(Dataset):
 
         return np.array(local_states, dtype=np.float32)
 
-    def _get_video_reader(self, video_path: str):
-        """Reuses cached VideoReader per worker process."""
-        if not hasattr(self, "_video_readers") or self._video_readers is None:
-            self._video_readers = {}
-        if video_path not in self._video_readers:
-            self._video_readers[video_path] = VideoReader(video_path, ctx=cpu(0))
-        return self._video_readers[video_path]
-
     def _read_video_frames(self, session_path: str, indices: np.ndarray) -> np.ndarray:
-        """Reads specific frames by index from ultrasound_bmode.mp4 using cached reader."""
+        """Reads specific frames by index from ultrasound_bmode.mp4."""
         video_path = self.video_path_map[session_path]
         if _HAS_DECORD:
-            vr = self._get_video_reader(video_path)
+            vr = VideoReader(video_path, num_threads=1, ctx=cpu(0))
+            vr.seek(0)
             frames = vr.get_batch(indices.tolist()).asnumpy()
+            del vr
             return frames
         else:
             cap = cv2.VideoCapture(video_path)
